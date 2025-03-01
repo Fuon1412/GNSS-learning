@@ -1,1 +1,0 @@
-rinex_file = r"C:\gLAB\win\GNSS_TUTBOOK_MASTER\FILES\TUT0\roap1810.09o"
