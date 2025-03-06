@@ -22,16 +22,16 @@ def process_rinex_csv(csv_file):
     # Convert 'Value' column to numeric, handling the case where 'F' is present
     df['Value'] = pd.to_numeric(df['Value'].apply(lambda x: str(x).replace('F', '')), errors='coerce')
     
-    # Group the data by Satellite and Epoch Time
-    grouped = df.groupby(['Satellite', 'Epoch Time'])
+    # Group the data by GPS and Epoch Time
+    grouped = df.groupby(['GPS', 'Epoch Time'])
     
     # Prepare list to store navigation data
     nav_data = []
     
     # Process each group (each satellite at a specific epoch)
-    for (satellite, epoch), group in grouped:
+    for (gps, epoch), group in grouped:
         # Create a dictionary for this satellite at this epoch
-        sv_data = {'Satellite': satellite, 'time': np.datetime64(epoch)}
+        sv_data = {'GPS': gps, 'time': np.datetime64(epoch)}
         
         # Convert group to dictionary of parameter-value pairs
         for _, row in group.iterrows():
@@ -62,33 +62,13 @@ def save_processed_data_to_txt(ds, output_file):
     df.to_csv(output_file, sep='\t', index=False)
     print(f"Data saved to {output_file}")
     
-def is_qzss_satellite(satellite_id):
-    """
-    Check if the satellite ID belongs to QZSS constellation.
-    
-    Args:
-        satellite_id (str): Satellite ID
-    
-    Returns:
-        bool: True if it's a QZSS satellite, False otherwise
-    """
-    # QZSS satellites typically have identifiers starting with 'J' or are numbered 193-199
-    if isinstance(satellite_id, str) and satellite_id.startswith('J'):
-        return True
-    try:
-        # Check if it's in the PRN range for QZSS (193-199)
-        sat_num = int(satellite_id)
-        return 193 <= sat_num <= 199
-    except ValueError:
-        return False
 
-def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
+def keplerian4coor(sv: xr.DataArray) -> tuple:
     """
     Convert Keplerian orbital elements to ECEF coordinates.
     
     Args:
         sv (xr.DataArray): Satellite navigation data
-        system (str): Navigation system ('GPS' or 'QZSS')
     
     Returns:
         tuple: Satellite coordinates in ECEF
@@ -101,34 +81,32 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     # Convert the DataArray to DataFrame
     sv_df = sv.to_dataframe().reset_index()
     
-    # Earth gravitational constant - same for GPS and QZSS
+    # Earth gravitational constant
     GM = 3.986005e14  # [m^3 s^-2]
     
-    # Earth rotation rate - same for GPS and QZSS
+    # Earth rotation rate
     omega_e = 7.292115e-5  # [rad s^-1]
     
-    # Get reference time information
+    # Get GPS Week
     gps_week = sv_df[sv_df['variable'] == 'GPSWeek']['satellite_data'].values[0]
+    
+    # Get reference epoch Toe
     toe_value = sv_df[sv_df['variable'] == 'Toe']['satellite_data'].values[0]
     
-    # QZSS uses the same reference system as GPS, starting from GPS epoch
-    reference_epoch = datetime(1980, 1, 6)
-    
     # Calculate tk (time from ephemerides reference epoch)
-    t = reference_epoch + timedelta(weeks=int(gps_week))
-    toe_time = reference_epoch + timedelta(weeks=int(gps_week), seconds=toe_value)
+    t = datetime(1980, 1, 6) + timedelta(weeks=int(gps_week))
+    toe_time = datetime(1980, 1, 6) + timedelta(weeks=int(gps_week), seconds=toe_value)
     tk_seconds = (t - toe_time).total_seconds()
     
-    # Apply the correction as per the formula
+    # Apply the correction as per the formula in the image
     if tk_seconds > 302400:
         tk_seconds -= 604800
-    if tk_seconds < -302400:
+    elif tk_seconds < -302400:
         tk_seconds += 604800
     
     # Get required parameters
     sqrtA = sv_df[sv_df['variable'] == 'sqrtA']['satellite_data'].values[0]
     e = sv_df[sv_df['variable'] == 'Eccentricity']['satellite_data'].values[0]
-    
     M0 = sv_df[sv_df['variable'] == 'M0']['satellite_data'].values[0]
     delta_n = sv_df[sv_df['variable'] == 'DeltaN']['satellite_data'].values[0]
     
@@ -138,7 +116,7 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     Mk = M0 + n * tk_seconds
     
     # Solve Kepler's equation to get the eccentric anomaly (Ek)
-    def solve_kepler(M, e, max_iter=10, tolerance=1e-15):
+    def solve_kepler(M, e, max_iter=100, tolerance=1e-8):
         Ek = M  # Initial guess
         for i in range(max_iter):
             delta_E = Ek - e * np.sin(Ek) - M
@@ -150,7 +128,6 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     
     # Solve for eccentric anomaly (Ek)
     Ek = solve_kepler(Mk, e)
-    
     
     # Compute true anomaly (vk)
     vk = np.arctan2(np.sqrt(1 - e**2) * np.sin(Ek), np.cos(Ek) - e)
@@ -188,24 +165,24 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     Lambda_k = Omega0 + (OmegaDot - omega_e) * tk_seconds - omega_e * toe_value
     
     # Rotation matrices
+    def calc_R3(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0],
+                         [np.sin(angle), np.cos(angle), 0],
+                         [0, 0, 1]])
+        
     def calc_R1(angle):
         return np.array([[1, 0, 0],
-                     [0, np.cos(angle), np.sin(angle)],
-                     [0, -np.sin(angle), np.cos(angle)]])
-        
-    def calc_R3(angle):
-        return np.array([[np.cos(angle), np.sin(angle), 0],
-                     [-np.sin(angle), np.cos(angle), 0],
-                     [0, 0, 1]])
+                         [0, np.cos(angle), -np.sin(angle)],
+                         [0, -np.sin(angle), np.cos(angle)]])
     
     # Calculate satellite position in orbital plane
     r_orb_plane = np.array([rk, 0, 0])
     
     # Apply rotations to get ECEF coordinates
-    # Apply rotations with negative angles to get TRS coordinates
     r_lambda_k = calc_R3(-Lambda_k)
     r_i_k = calc_R1(-ik)
     r_u_k = calc_R3(-uk)
+    
     r_orb = np.dot(r_lambda_k, np.dot(r_i_k, np.dot(r_u_k, r_orb_plane)))
     
     x = r_orb[0]
@@ -215,21 +192,19 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     return x, y, z
 
 # Save the coordinates to a CSV file
-def save_coordinates_to_csv(satellite_id, epoch, coords, system, output_file):
+def save_coordinates_to_csv(gps_id, epoch, coords, output_file):
     """
-    Save satellite coordinates, time, satellite ID, and system to a CSV file.
+    Save satellite coordinates, time, and GPS ID to a CSV file.
     
     Args:
-        satellite_id (str): The satellite ID.
+        gps_id (str): The GPS satellite ID.
         epoch (datetime): The epoch time of the data point.
         coords (tuple): The satellite coordinates (x, y, z).
-        system (str): Navigation system ('GPS' or 'QZSS')
         output_file (str): The path to the output CSV file.
     """
     # Prepare the data as a DataFrame
     df_coords = pd.DataFrame([{
-        'Satellite': satellite_id,
-        'System': system,
+        'GPS': gps_id,
         'Epoch Time': epoch,
         'x': coords[0],
         'y': coords[1],
@@ -240,31 +215,22 @@ def save_coordinates_to_csv(satellite_id, epoch, coords, system, output_file):
     df_coords.to_csv(output_file, mode='a', header=not pd.io.common.file_exists(output_file), index=False)
 
 # Main execution
-def main():
-    csv_file = r"qzss_output.csv"
-    ds = process_rinex_csv(csv_file)
-    output_file = "processed_data.txt"
-    save_processed_data_to_txt(ds, output_file)
+csv_file = r"rinex_output.csv"
+ds = process_rinex_csv(csv_file)
+output_file = "processed_data.txt"
+save_processed_data_to_txt(ds, output_file)
 
-    # CSV file to save coordinates
-    coordinates_output_file = "satellite_coordinates_v4.csv"  # Updated version
-    
-    # Process each satellite data and calculate its position
-    for satellite_id, group in ds.groupby('Satellite'):
-        # Determine if the satellite is QZSS or GPS
-        system = 'QZSS' if is_qzss_satellite(satellite_id) else 'GPS'
+# CSV file to save coordinates
+coordinates_output_file = "satellite_coordinates.csv"  # File to save coordinates
+
+# Process each satellite data and calculate its position
+for gps_id, group in ds.groupby('GPS'):
+    for epoch, sv_data in group.groupby('time'):
+        # Extract satellite data for this time and GPS
+        sv = sv_data.to_array()
         
-        for epoch, sv_data in group.groupby('time'):
-            # Extract satellite data for this time and Satellite
-            sv = sv_data.to_array()
-            
-            # Calculate the position in ECEF coordinates
-            x, y, z = keplerian4coor(sv, system=system)
-            
-            # Save the coordinates along with time and Satellite ID to CSV
-            save_coordinates_to_csv(satellite_id, epoch, (x, y, z), system, coordinates_output_file)
-    
-    print(f"Coordinate calculations complete. Results saved to {coordinates_output_file}")
-
-if __name__ == "__main__":
-    main()
+        # Calculate the position in ECEF coordinates
+        x, y, z = keplerian4coor(sv)
+        
+        # Save the coordinates along with time and GPS ID to CSV
+        save_coordinates_to_csv(gps_id, epoch, (x, y, z), coordinates_output_file)

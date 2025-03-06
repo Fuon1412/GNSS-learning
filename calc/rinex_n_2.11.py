@@ -4,7 +4,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # Input and output file paths
-rinex_file = "../data/brdc1810.09n"
+rinex_file = "../data/test.09n"
 output_csv = "rinex_output.csv"
 
 # Mapping of original field names to their symbolic representations
