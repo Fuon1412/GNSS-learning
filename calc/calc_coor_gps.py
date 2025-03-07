@@ -63,12 +63,17 @@ def save_processed_data_to_txt(ds, output_file):
     print(f"Data saved to {output_file}")
     
 
-def keplerian4coor(sv: xr.DataArray) -> tuple:
+import numpy as np
+from datetime import datetime, timedelta
+import xarray as xr
+
+def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     """
     Convert Keplerian orbital elements to ECEF coordinates.
     
     Args:
         sv (xr.DataArray): Satellite navigation data
+        system (str): Navigation system ('GPS' or 'QZSS')
     
     Returns:
         tuple: Satellite coordinates in ECEF
@@ -81,32 +86,34 @@ def keplerian4coor(sv: xr.DataArray) -> tuple:
     # Convert the DataArray to DataFrame
     sv_df = sv.to_dataframe().reset_index()
     
-    # Earth gravitational constant
+    # Earth gravitational constant - same for GPS and QZSS
     GM = 3.986005e14  # [m^3 s^-2]
     
-    # Earth rotation rate
+    # Earth rotation rate - same for GPS and QZSS
     omega_e = 7.292115e-5  # [rad s^-1]
     
-    # Get GPS Week
+    # Get reference time information
     gps_week = sv_df[sv_df['variable'] == 'GPSWeek']['satellite_data'].values[0]
-    
-    # Get reference epoch Toe
     toe_value = sv_df[sv_df['variable'] == 'Toe']['satellite_data'].values[0]
     
+    # QZSS uses the same reference system as GPS, starting from GPS epoch
+    reference_epoch = datetime(1980, 1, 6)
+    
     # Calculate tk (time from ephemerides reference epoch)
-    t = datetime(1980, 1, 6) + timedelta(weeks=int(gps_week))
-    toe_time = datetime(1980, 1, 6) + timedelta(weeks=int(gps_week), seconds=toe_value)
+    t = reference_epoch + timedelta(weeks=int(gps_week))
+    toe_time = reference_epoch + timedelta(weeks=int(gps_week), seconds=toe_value)
     tk_seconds = (t - toe_time).total_seconds()
     
-    # Apply the correction as per the formula in the image
+    # Apply the correction as per the formula
     if tk_seconds > 302400:
         tk_seconds -= 604800
-    elif tk_seconds < -302400:
+    if tk_seconds < -302400:
         tk_seconds += 604800
     
     # Get required parameters
     sqrtA = sv_df[sv_df['variable'] == 'sqrtA']['satellite_data'].values[0]
     e = sv_df[sv_df['variable'] == 'Eccentricity']['satellite_data'].values[0]
+    
     M0 = sv_df[sv_df['variable'] == 'M0']['satellite_data'].values[0]
     delta_n = sv_df[sv_df['variable'] == 'DeltaN']['satellite_data'].values[0]
     
@@ -116,7 +123,7 @@ def keplerian4coor(sv: xr.DataArray) -> tuple:
     Mk = M0 + n * tk_seconds
     
     # Solve Kepler's equation to get the eccentric anomaly (Ek)
-    def solve_kepler(M, e, max_iter=100, tolerance=1e-8):
+    def solve_kepler(M, e, max_iter=10, tolerance=1e-15):
         Ek = M  # Initial guess
         for i in range(max_iter):
             delta_E = Ek - e * np.sin(Ek) - M
@@ -165,24 +172,24 @@ def keplerian4coor(sv: xr.DataArray) -> tuple:
     Lambda_k = Omega0 + (OmegaDot - omega_e) * tk_seconds - omega_e * toe_value
     
     # Rotation matrices
-    def calc_R3(angle):
-        return np.array([[np.cos(angle), -np.sin(angle), 0],
-                         [np.sin(angle), np.cos(angle), 0],
-                         [0, 0, 1]])
-        
     def calc_R1(angle):
         return np.array([[1, 0, 0],
-                         [0, np.cos(angle), -np.sin(angle)],
-                         [0, -np.sin(angle), np.cos(angle)]])
+                     [0, np.cos(angle), np.sin(angle)],
+                     [0, -np.sin(angle), np.cos(angle)]])
+        
+    def calc_R3(angle):
+        return np.array([[np.cos(angle), np.sin(angle), 0],
+                     [-np.sin(angle), np.cos(angle), 0],
+                     [0, 0, 1]])
     
     # Calculate satellite position in orbital plane
     r_orb_plane = np.array([rk, 0, 0])
     
     # Apply rotations to get ECEF coordinates
+    # Apply rotations with negative angles to get TRS coordinates
     r_lambda_k = calc_R3(-Lambda_k)
     r_i_k = calc_R1(-ik)
     r_u_k = calc_R3(-uk)
-    
     r_orb = np.dot(r_lambda_k, np.dot(r_i_k, np.dot(r_u_k, r_orb_plane)))
     
     x = r_orb[0]
@@ -204,8 +211,8 @@ def save_coordinates_to_csv(gps_id, epoch, coords, output_file):
     """
     # Prepare the data as a DataFrame
     df_coords = pd.DataFrame([{
-        'GPS': gps_id,
-        'Epoch Time': epoch,
+        'Satellite': gps_id,
+        'Epoch Time': pd.Timestamp(epoch).strftime('%Y-%m-%d %H:%M:%S'),
         'x': coords[0],
         'y': coords[1],
         'z': coords[2]

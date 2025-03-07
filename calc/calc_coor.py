@@ -217,26 +217,24 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
 # Save the coordinates to a CSV file
 def save_coordinates_to_csv(satellite_id, epoch, coords, system, output_file):
     """
-    Save satellite coordinates, time, satellite ID, and system to a CSV file.
+    Save satellite coordinates, time, and satellite ID to a CSV file.
     
     Args:
         satellite_id (str): The satellite ID.
-        epoch (datetime): The epoch time of the data point.
+        epoch (numpy.datetime64): The epoch time of the data point.
         coords (tuple): The satellite coordinates (x, y, z).
         system (str): Navigation system ('GPS' or 'QZSS')
         output_file (str): The path to the output CSV file.
     """
-    # Prepare the data as a DataFrame
     df_coords = pd.DataFrame([{
         'Satellite': satellite_id,
-        'System': system,
-        'Epoch Time': epoch,
+        'Epoch Time': pd.Timestamp(epoch).strftime('%Y-%m-%d %H:%M:%S'),  # Chuyển đổi để lưu đúng định dạng
         'x': coords[0],
         'y': coords[1],
         'z': coords[2]
     }])
-    
-    # Save to CSV, append mode
+
+    # Lưu vào CSV, đảm bảo có header nếu tệp chưa tồn tại
     df_coords.to_csv(output_file, mode='a', header=not pd.io.common.file_exists(output_file), index=False)
 
 # Main execution
