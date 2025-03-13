@@ -217,8 +217,13 @@ def keplerian4coor(sat_nav_params, sat_obs_df, system='GPS'):
         distance = np.sqrt(X**2 + Y**2 + Z**2)
         
         # Store results
-        results.append((obs_epoch, X, Y, Z, distance))
-    
+        results.append({
+            "Epoch Time": str(obs_epoch),  # Chuyển thành chuỗi để lưu JSON
+            "X": X,
+            "Y": Y,
+            "Z": Z,
+            "Distance": distance
+        })
     return results
 
 # Main Execution
@@ -266,7 +271,7 @@ def main():
     # Output results to a JSON file
     output_file = 'satellite_positions.json'
     with open(output_file, 'w') as outfile:
-        json.dump(result_dict, outfile, default=str)
+        json.dump(result_dict, outfile, indent=4)
         print(f"Results written to {output_file}")
     
     print(f"Processed {len(common_satellites)} satellites, {len(result_dict)} with valid results")
