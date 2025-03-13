@@ -1,5 +1,6 @@
 import re
 import pandas as pd
+import json
 from datetime import datetime
 
 def extract_numbers(line):
@@ -9,15 +10,9 @@ def extract_numbers(line):
     return re.findall(r'[-+]?\d*\.\d+E[+-]\d+|[-+]?\d+', line.replace('D', 'E'))
 
 def _obstime(fol):
-    """
-    Convert observation time components to a datetime object.
-    """
-    year = int(fol[0])
-    if 80 <= year <= 99:
-        year += 1900
-    elif year < 80:
-        year += 2000
-    return datetime(year, int(fol[1]), int(fol[2]), int(fol[3]), int(fol[4]), int(fol[5]))
+    return datetime(year=int(fol[0]), month=int(fol[1]), day=int(fol[2]),
+                    hour=int(fol[3]), minute=int(fol[4]),
+                    second=int(float(fol[5])))
 
 def read_rinex_body(file):
     """
@@ -40,12 +35,13 @@ def read_rinex_body(file):
         # Process navigation data
         for line in f:
             prn_str = line[:3].strip()
-            if not prn_str.startswith('J'):
-                continue  # Only process QZSS satellites
             
             # Parse datetime and PRN
             dt = _obstime([line[4:8], line[9:11], line[12:14], line[15:17], line[18:20], line[21:23]])
-            prn = f'QZSS{prn_str[1:]}'
+            prn = f'G{prn_str[1:]}'
+            
+            if prn != "G05":
+                continue
             
             # Collect raw data across multiple lines
             raw_data = [line[23:].strip()]
@@ -59,26 +55,28 @@ def read_rinex_body(file):
             raw_values = extract_numbers(" ".join(raw_data))
             
             # Ensure correct field-value mapping
+            entry = {"Satellite": prn, "Epoch Time": dt.strftime('%Y-%m-%d %H:%M:%S')}
             for k, v in zip(fields, raw_values):
                 try:
-                    nav_data.append({"Satellite": prn, "Epoch Time": dt, "Parameter": k, "Value": float(v)})
+                    entry[k] = float(v)
                 except ValueError:
-                    nav_data.append({"Satellite": prn, "Epoch Time": dt, "Parameter": k, "Value": None})
+                    entry[k] = None
+            nav_data.append(entry)
     
     return nav_data
 
-def save_to_csv(data, output_file):
+def save_to_json(data, output_file):
     """
-    Save navigation data to a CSV file.
+    Save navigation data to a JSON file.
     """
-    df = pd.DataFrame(data)
-    df.to_csv(output_file, index=False)
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4)
     print(f"Data saved to {output_file}")
 
 # File paths
-rinex_file = "../data/30340780.21q"
-output_csv = "qzss_output.csv"
+rinex_file = "../data/GPS_nav_3.02.rnx"
+output_json = "gps_output_2.json"
 
 # Run extraction
 nav_data = read_rinex_body(rinex_file)
-save_to_csv(nav_data, output_csv)
+save_to_json(nav_data, output_json)

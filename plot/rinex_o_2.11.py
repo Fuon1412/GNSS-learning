@@ -1,52 +1,89 @@
-import re  # regular expression
-import matplotlib.pyplot as plt # type: ignore # matplot for plot data
+import re
 import os
-from datetime import datetime  # date time to convert epoch-time
-from collections import defaultdict # use for store data
+import csv
+from datetime import datetime
+from collections import defaultdict
+from pathlib import Path
+from typing import List
+import numpy as np
 
-rinex_file = r"../data/roap1810.09o"  # Use uploaded file path
+# Input and output file paths
+rinex_file = r"../data/roap1810.09o"
 
-output_dir = "epoch_plots"
-os.makedirs(output_dir, exist_ok=True)
-
-header_data = {}  # dictionary to store header data
-types_of_obs = [] # list of observation types
-obs_data = defaultdict(list)  # This will store data with the epoch time as the key and a list of tuples as values
-
-def convert_epoch_time(epoch_time):
-    parts = epoch_time.split()
-    # Split time from string
-    year, month, day, hour, minute = map(int, parts[:5])
-    second = float(parts[5]) # Because seconds value are float so we need to convert it separately
-    # Convert days, months, years, hours, minutes, seconds to new format
-    formatted_time = datetime(year + 2000, month, day, hour, minute, int(second)).strftime("%H:%M:%S %d/%m/%Y")
-    # Convert again for datetime type
-    converted_epoch_time = datetime.strptime(formatted_time, "%H:%M:%S %d/%m/%Y")
-    return converted_epoch_time 
-
-# Read the RINEX file
-# Header data
-def read_rinex_header(rinex_file):
-    global types_of_obs
-    with open(rinex_file, 'r', encoding="utf-8") as f:
+def scan_header(file):
+    """
+    Scan RINEX header and extract relevant information.
+    
+    Args:
+        file (str): Path to the RINEX file
+    
+    Returns:
+        dict: Dictionary containing relevant header information
+    """
+    header = defaultdict(str)
+    types_of_obs = []
+    with open(file, 'r') as f:
         for line in f:
-            if "RINEX VERSION / TYPE" in line:
-                header_data["version"] = float(line.split()[0])
-                header_data["filetype"] = re.split(r'\s{2,}', line.strip())[1]
-                header_data["sat_sys"] = re.split(r'\s{2,}', line.strip())[2]
-            if header_data["version"] != 2.11:
-                print("Only RINEX version 2.11 is supported")
+            if "END OF HEADER" in line:
                 break
+            elif "RINEX VERSION / TYPE" in line:
+                header['version'] = float(line.split()[0])
+                header['filetype'] = re.split(r'\s{2,}', line.strip())[1]
+                header['satellite'] = re.split(r'\s{2,}', line.strip())[2]
             elif "# / TYPES OF OBSERV" in line:
                 parts = line.split("# / TYPES OF OBSERV")[0].split()
-                header_data["num_obs"] = int(parts[0])  # Number of observation types
+                header["num_obs"] = int(parts[0])  # Number of observation types
                 types_of_obs = parts[1:]  # List of observation types
-            elif "END OF HEADER" in line:
-                break
-    return header_data, types_of_obs
+            elif "APPROX POSITION XYZ" in line:
+                header['position'] = [float(line[:14]), float(line[14:28]), float(line[28:42])]
+            elif "TIME OF FIRST OBS" in line:
+                header['first_obs'] = [int(line[:6]), int(line[6:12]), int(line[12:18]), int(line[18:24]), int(line[24:30]), float(line[30:43])]
+            elif "TIME OF LAST OBS" in line:
+                header['last_obs'] = [int(line[:6]), int(line[6:12]), int(line[12:18]), int(line[18:24]), int(line[24:30]), float(line[30:43])]
+            elif "INTERVAL" in line:
+                header['interval'] = float(line[:10])
+    return header, types_of_obs
 
-# Observation data
-# In this step, we part the data because the observable data is divided by 16 characters per value
+header, types_of_obs = scan_header(rinex_file)
+# Get the indices of C1 and L1 from observation types
+try:
+    idx_c1 = types_of_obs.index("C1")
+    idx_l1 = types_of_obs.index("L1")
+except ValueError:
+    print("Cannot find L1 or C1 index in TYPES OF OBSERV")
+    exit()
+
+def _obstime(fol: List[str]) -> datetime:
+    """
+    Python >= 3.7 supports nanoseconds.  https://www.python.org/dev/peps/pep-0564/
+    Python < 3.7 supports microseconds.
+    """
+    year = int(fol[0])
+    if 80 <= year <= 99:
+        year += 1900
+    elif year < 80:  # because we might pass in four-digit year
+        year += 2000
+
+    return datetime(year=year, month=int(fol[1]), day=int(fol[2]),
+                    hour=int(fol[3]), minute=int(fol[4]),
+                    second=int(float(fol[5])),
+                    microsecond=int(float(fol[5]) % 1 * 1000000)
+                    )
+    
+def extract_satellite_list(sat_list):
+    """
+    Extract satellite list from the Epoch line.
+    
+    Args:
+        sat_list (str): String containing satellite data
+    
+    Returns:
+        list: List of satellites in the format "G+number"
+    """
+    sat_list_cleaned = re.sub(r'\s+', '', sat_list)
+    satellites = re.findall(r'G\d+', sat_list_cleaned)
+    return satellites
+
 def parse_observation_line(line, num_obs):
     obs_values = []
     for i in range(num_obs):
@@ -62,86 +99,29 @@ def parse_observation_line(line, num_obs):
             obs_values.append(None)
     return obs_values
 
-# Read RINEX data
-def read_rinex_data(rinex_file):
-    global obs_data
-    with open(rinex_file, 'r', encoding="utf-8") as f:
-        # Skip header
+def scan_obs_data(file):
+    with open(file, 'r') as f:
         for line in f:
             if "END OF HEADER" in line:
                 break
         
-        epoch_time = None  # Initialize epoch time
-        
         for line in f:
-            # Detect epoch start
             if re.match(r"^\s*\d{1,4}\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\.\d+\s+\d+", line):
-                epoch_time = line.strip()  # Store epoch time
-                formatted_epoch_time = convert_epoch_time(epoch_time)  # Convert to datetime
-                continue  # Go to next line (satellite data)
-            
-            # Process satellite observation data
-            obs_values = parse_observation_line(line, len(types_of_obs))  # Parse correctly
-            
-            if idx_c1 >= len(obs_values) or idx_l1 >= len(obs_values):
-                continue  # Skip if indices are out of range
-            
-            try:
-                c1_value = obs_values[idx_c1]  # Pseudo-range value (C1)
-                l1_value = obs_values[idx_l1]  # Carrier-phase value (L1)
-                obs_data[formatted_epoch_time].append((l1_value, c1_value))
-            except (IndexError, ValueError):
-                continue  # Skip invalid lines
+                epoch = _obstime([line[1:3], line[4:6], line[7:9], line[10:12], line[13:15], line[16:26]])
+                num_of_sat = int(line[29:32])
+                satellites = extract_satellite_list(line[32:])
+            for _ in range(num_of_sat):
+                line = f.readline()
+                if not line:
+                    break
+                 # Process satellite observation data
+                obs_values = parse_observation_line(line, len(types_of_obs))  # Parse correctly
+                prn = satellites[_]
+                c1 = obs_values[idx_c1]
+                l1 = obs_values[idx_l1]
+                print(f"Epoch: {epoch}, PRN: {prn}, C1: {c1}, L1: {l1}")
+                
+    return None
 
-    return obs_data
-
-# Get header and observation types data
-header_data, types_of_obs = read_rinex_header(rinex_file)
-
-# Get the indices of C1 and L1 from observation types
-try:
-    idx_c1 = types_of_obs.index("C1")
-    idx_l1 = types_of_obs.index("L1")
-except ValueError:
-    print("Cannot find L1 or C1 index in TYPES OF OBSERV")
-    exit()
-
-# Read observation data
-obs_data = read_rinex_data(rinex_file)
-
-# Display the results for checking
-print(header_data)
-print(types_of_obs)
-print(list(obs_data.items())[:5])
-
-# Prepare data for plotting
-epoch_times = []
-pseudo_ranges = []
-carrier_phases = []
-
-# Collect data while skipping None values
-for epoch, values in obs_data.items():
-    for l1, c1 in values:
-        if c1 is not None and l1 is not None:  # Skip if either value is None
-            epoch_times.append(epoch)
-            pseudo_ranges.append(c1)
-            carrier_phases.append(l1)
-
-# Plot all data on a single chart
-plt.figure(figsize=(12, 6))
-
-plt.plot(epoch_times, pseudo_ranges, linestyle='-', color='b', label="Pseudo-range (C1)")
-plt.plot(epoch_times, carrier_phases, linestyle='-', color='r', label="Carrier-phase (L1)")
-
-plt.xlabel("Epoch Time")
-plt.ylabel("Observation Value")
-plt.title("Observation Data Over Time")
-plt.xticks(rotation=45)  # Rotate X-axis labels for better readability
-plt.legend()
-plt.grid(True)
-
-# Save the plot
-file_name = f"{output_dir}/all_epochs_plot.png"
-plt.savefig(file_name)
-
-print(f"Plot saved as {file_name}")
+scan_obs_data(rinex_file)
+# Output:

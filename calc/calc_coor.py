@@ -102,7 +102,7 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     sv_df = sv.to_dataframe().reset_index()
     
     # Earth gravitational constant - same for GPS and QZSS
-    GM = 3.986005e14  # [m^3 s^-2]
+    GM = 3.986004418e14  # [m^3 s^-2]
     
     # Earth rotation rate - same for GPS and QZSS
     omega_e = 7.292115e-5  # [rad s^-1]
@@ -120,10 +120,11 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     tk_seconds = (t - toe_time).total_seconds()
     
     # Apply the correction as per the formula
-    if tk_seconds > 302400:
-        tk_seconds -= 604800
-    if tk_seconds < -302400:
-        tk_seconds += 604800
+    match tk_seconds:
+        case _ if tk_seconds > 302400:
+            tk_seconds -= 604800
+        case _ if tk_seconds < -302400:
+            tk_seconds += 604800
     
     # Get required parameters
     sqrtA = sv_df[sv_df['variable'] == 'sqrtA']['satellite_data'].values[0]
@@ -185,6 +186,8 @@ def keplerian4coor(sv: xr.DataArray, system: str = 'GPS') -> tuple:
     OmegaDot = sv_df[sv_df['variable'] == 'OmegaDot']['satellite_data'].values[0]
     
     # Compute longitude of ascending node (Lambda_k)
+    print((OmegaDot - omega_e) * tk_seconds)
+    print(omega_e * toe_value)
     Lambda_k = Omega0 + (OmegaDot - omega_e) * tk_seconds - omega_e * toe_value
     
     # Rotation matrices
